@@ -1,0 +1,141 @@
+import signal
+
+import cv2
+import mediapipe as mp
+import numpy as np
+import time
+import os
+
+# Pygame mixer initialize kar rahe hain sound play karne ke liye
+from pygame import mixer
+mixer.init()
+
+# ---- Configuration ----
+MODEL_PATH = r"C:\Users\Trishita Sarkar\opencv\Drowsiness Detection\face_landmarker.task"
+# Windows extension hide hone ki wajah se jo bhi naam ho, yeh dono check kar lega
+SOUND_PATH_1 = r"C:\Users\Trishita Sarkar\opencv\Drowsiness Detection\alarm.wav.mp3"
+SOUND_PATH_2 = r"C:\Users\Trishita Sarkar\opencv\Drowsiness Detection\alarm.wav.mp3"
+EAR_THRESHOLD = 0.22
+CONSECUTIVE_FRAMES = 20
+
+# MediaPipe New Tasks API modules setup
+BaseOptions = mp.tasks.BaseOptions
+FaceLandmarker = mp.tasks.vision.FaceLandmarker
+FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
+VisionRunningMode = mp.tasks.vision.RunningMode
+
+# Eyes indices (MediaPipe 468 mesh model format)
+LEFT_EYE = [362, 385, 387, 263, 373, 380]
+RIGHT_EYE = [33, 160, 158, 133, 153, 144]
+
+frame_counter = 0
+alarm_playing = False  # Track karne ke liye ki sound chal rahi hai ya nahi
+
+def calculate_ear(landmarks, eye_indices, img_w, img_h):
+    coords = []
+    for idx in eye_indices:
+        lm = landmarks[idx]
+        cx, cy = int(lm.x * img_w), int(lm.y * img_h)
+        coords.append(np.array([cx, cy]))
+    
+    # Distance extraction for EAR
+    v1 = np.linalg.norm(coords[1] - coords[5])
+    v2 = np.linalg.norm(coords[2] - coords[4])
+    h = np.linalg.norm(coords[0] - coords[3])
+    
+    ear = (v1 + v2) / (2.0 * h)
+    return ear
+
+def play_alarm():
+    global alarm_playing
+    if not alarm_playing:
+        # Dono possible file names check kar rahe hain
+        actual_path = None
+        if os.path.exists(SOUND_PATH_1):
+            actual_path = SOUND_PATH_1
+        elif os.path.exists(SOUND_PATH_2):
+            actual_path = SOUND_PATH_2
+            
+        if actual_path:
+            try:
+                mixer.music.load(actual_path)
+                mixer.music.play(-1)  # Loop mein sound bajegi
+                alarm_playing = True
+            except Exception as e:
+                print(f"Sound play nahi ho payi: {e}")
+        else:
+            print("Alert! Sound file pure folder mein nahi mili.")
+
+def stop_alarm():
+    global alarm_playing
+    if alarm_playing:
+        mixer.music.stop()
+        alarm_playing = False
+
+# ---- Initialize Face Landmarker ----
+options = FaceLandmarkerOptions(
+    base_options=BaseOptions(model_asset_path=MODEL_PATH),
+    running_mode=VisionRunningMode.VIDEO,
+    num_faces=1
+)
+
+cap = cv2.VideoCapture(0)
+
+with FaceLandmarker.create_from_options(options) as landmarker:
+    print("\nNew MediaPipe Tasks Drowsiness System with Pygame Audio Started!")
+    print("Press 'q' key to close the program.")
+    
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            break
+            
+        frame = cv2.flip(frame, 1)
+        h, w, _ = frame.shape
+        
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        frame_timestamp_ms = int(time.time() * 1000)
+        
+        detection_result = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
+        
+        if detection_result.face_landmarks:
+            for face_landmarks in detection_result.face_landmarks:
+                
+                left_ear = calculate_ear(face_landmarks, LEFT_EYE, w, h)
+                right_ear = calculate_ear(face_landmarks, RIGHT_EYE, w, h)
+                avg_ear = (left_ear + right_ear) / 2.0
+                
+                if avg_ear < EAR_THRESHOLD:
+                    frame_counter += 1
+                    if frame_counter >= CONSECUTIVE_FRAMES:
+                        cv2.putText(frame, "!!! DROWSINESS ALERT !!!", (30, 80),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                        play_alarm()
+                else:
+                    frame_counter = 0
+                    stop_alarm()
+                
+                color = (0, 255, 0) if avg_ear >= EAR_THRESHOLD else (0, 0, 255)
+                cv2.putText(frame, f"EAR: {avg_ear:.2f}", (30, 35),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                cv2.putText(frame, f"Closed Frames: {frame_counter}", (30, 430),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                
+                for idx in LEFT_EYE + RIGHT_EYE:
+                    lm = face_landmarks[idx]
+                    cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 2, (0, 255, 255), -1)
+        else:
+            frame_counter = 0
+            stop_alarm()
+            cv2.putText(frame, "No Face Detected", (30, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+                        
+        cv2.imshow('Drowsiness Detection (New MediaPipe Tasks)', frame)
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+stop_alarm()
+cap.release()
+cv2.destroyAllWindows()
